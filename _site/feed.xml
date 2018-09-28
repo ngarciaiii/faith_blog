@@ -1,0 +1,370 @@
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom"><generator uri="http://jekyllrb.com" version="3.1.6">Jekyll</generator><link href="http://doubtingchrist.com/feed.xml" rel="self" type="application/atom+xml" /><link href="http://doubtingchrist.com/" rel="alternate" type="text/html" /><updated>2018-09-27T23:31:40-04:00</updated><id>http://doubtingchrist.com/</id><title>Louis Rassaby</title><subtitle>Louis Rassaby is a Brooklyn-based software engineer and entrepreneur specializing in Scala and back-end development.
+He&#39;s the founder of Wirefreight, a customer service platform for freight. Previously, Louis led the new products engineering team
+at Phosphorus Genomics.
+</subtitle><author><name>Louis Rassaby</name></author><entry><title>AWS Batch Array Jobs and GPU Processing</title><link href="http://doubtingchrist.com/aws-batch-array-jobs/" rel="alternate" type="text/html" title="AWS Batch Array Jobs and GPU Processing" /><published>2018-07-21T20:00:00-04:00</published><updated>2018-07-21T20:00:00-04:00</updated><id>http://doubtingchrist.com/aws-batch-array-jobs</id><content type="html" xml:base="http://doubtingchrist.com/aws-batch-array-jobs/">&lt;p&gt;For a recent contract job, I had to build a batch computing pipeline for scientific computation.&lt;/p&gt;
+
+&lt;p&gt;The steps were:
+1. A pre-processing step running across a small CPU cluster
+2. A processing step running on a 100-machine CPU cluster
+3. A calibration step running on one machine
+4. A processing step running on a 100-machine GPU cluster&lt;/p&gt;
+
+&lt;h2 id=&quot;architecture&quot;&gt;Architecture&lt;/h2&gt;
+
+&lt;p&gt;After investigating a few different architectures, I concluded that AWS Batch provided the best combination of features we needed. Designed 
+for high performance computing (HPC), AWS Batch is a thin wrapper around AWS Elastic Container Service that allows
+users to run jobs in a scalable cluster and chain them together into pipelines.&lt;/p&gt;
+
+&lt;p&gt;The biggest issue I ran into was gaps in documentation, particularly around AWS Batch and using GPUs inside Docker containers.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/assets/img/aws-architecture.png&quot; alt=&quot;aws-architecture&quot; title=&quot;AWS Architecture&quot; /&gt;&lt;/p&gt;
+
+&lt;p&gt;The architecture I ended up choosing uses CircleCI to push Docker images to Amazon ECR. Those images are later used by 
+AWS Batch to launch ECS clusters to run jobs on CPU and GPU clusters. That’s a bit of a mouthful, so I’ll try to unpack the architecture in 
+the rest of this post.&lt;/p&gt;
+
+&lt;h2 id=&quot;code-deployment&quot;&gt;Code Deployment&lt;/h2&gt;
+
+&lt;p&gt;The first order of business was cleaning up the repository. The master branch was out of date with other branches,
+so I worked with the scientists to solve some tech debt.&lt;/p&gt;
+
+&lt;p&gt;Next, I Dockerized the codebase. This was complicated by GPU processing, which is architecture-dependent. 
+My Mac (with an Intel GPU) wouldn’t behave in the same way as AWS (NVIDIA).&lt;/p&gt;
+
+&lt;p&gt;I ended up revising this dozens of times before I got it right. Here’s a snippet of the Dockerfile ended up with:
+```docker
+FROM python:2.7-jessie&lt;/p&gt;
+
+&lt;h1 id=&quot;install-other-dependencies-not-shown&quot;&gt;… install other dependencies (not shown)&lt;/h1&gt;
+
+&lt;h1 id=&quot;nvidia-container-runtime&quot;&gt;nvidia-container-runtime&lt;/h1&gt;
+&lt;p&gt;ENV NVIDIA_VISIBLE_DEVICES all
+ENV NVIDIA_DRIVER_CAPABILITIES compute,utility&lt;/p&gt;
+
+&lt;h1 id=&quot;opencl-httpsgitlabcomnvidiaopenclblobubuntu1604runtimedockerfile&quot;&gt;OpenCL (https://gitlab.com/nvidia/opencl/blob/ubuntu16.04/runtime/Dockerfile)&lt;/h1&gt;
+&lt;p&gt;RUN apt-get update &amp;amp;&amp;amp; apt-get install -y –no-install-recommends \
+        ocl-icd-libopencl1 \
+        opencl-headers &amp;amp;&amp;amp; \
+    rm -rf /var/lib/apt/lists/*&lt;/p&gt;
+
+&lt;h1 id=&quot;section&quot;&gt;:(&lt;/h1&gt;
+&lt;p&gt;RUN ln -s /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 /usr/lib/x86_64-linux-gnu/libOpenCL.so
+RUN pip install pyopencl&lt;/p&gt;
+
+&lt;h1 id=&quot;nvidia-driver&quot;&gt;NVIDIA driver&lt;/h1&gt;
+&lt;p&gt;RUN mkdir -p /etc/OpenCL/vendors &amp;amp;&amp;amp; \
+    echo “libnvidia-opencl.so.1” &amp;gt; /etc/OpenCL/vendors/nvidia.icd
+```&lt;/p&gt;
+
+&lt;p&gt;After I got Docker images working, I set up CircleCI to run builds and tests, and deploy images to Amazon’s EC2 Container Registry (ECR).&lt;/p&gt;
+
+&lt;h2 id=&quot;getting-things-running&quot;&gt;Getting things running&lt;/h2&gt;
+
+&lt;p&gt;The goal of the client was to create a simple way to set up, run, and monitor batch jobs.&lt;/p&gt;
+
+&lt;h3 id=&quot;setup&quot;&gt;Setup&lt;/h3&gt;
+
+&lt;p&gt;Setup is performed by a series of CloudFormation templates, each of which exports variables that can be subsequently
+used by other templates.
+1. Set up permissions (&lt;code class=&quot;highlighter-rouge&quot;&gt;deploy_iam_roles.yaml&lt;/code&gt;)
+2. Set up an ECR repository (&lt;code class=&quot;highlighter-rouge&quot;&gt;deploy_ecr_repository.yaml&lt;/code&gt;)
+3. Set up a custom GPU AMI based on Amazon Linux with &lt;code class=&quot;highlighter-rouge&quot;&gt;nvidia-docker2&lt;/code&gt; installed (&lt;code class=&quot;highlighter-rouge&quot;&gt;deploy_custom_ami.yaml&lt;/code&gt;)
+4. Set up AWS Batch queues, CPU and GPU compute environments of spot instances, and job definitions. (&lt;code class=&quot;highlighter-rouge&quot;&gt;deploy_batch_env.yaml&lt;/code&gt;)&lt;/p&gt;
+
+&lt;h3 id=&quot;cli-run-monitor-and-stop-jobs&quot;&gt;CLI: run, monitor, and stop jobs&lt;/h3&gt;
+
+&lt;p&gt;For running the pipeline, I built a simple command line tool that can launch new pipelines, monitor existing ones, and 
+stop jobs if things go wrong.&lt;/p&gt;
+
+&lt;h3 id=&quot;behind-the-scenes&quot;&gt;Behind the scenes&lt;/h3&gt;
+
+&lt;p&gt;AWS Batch launches either normal jobs (1 Docker container) or “array jobs” (any number of Docker containers) for each step. Those 
+Docker containers in turn run on a cluster of EC2 instances.&lt;/p&gt;
+
+&lt;p&gt;The CLI will decide based on the job name which of two queues to run the job in:
+- An auto-managed CPU-optimized cluster of standard AMIs
+- A self-managed GPU-optimized cluster using a custom Amazon Machine Image (AMI)&lt;/p&gt;
+
+&lt;p&gt;Each Docker container in a cluster receives the following environment variables:
+- &lt;code class=&quot;highlighter-rouge&quot;&gt;AWS_BATCH_JOB_ARRAY_INDEX&lt;/code&gt;: an integer passed in by AWS to indicate which machine is running. This is the only 
+variable that distinguishes jobs from each other, a limitation imposed by AWS Batch.
+- &lt;code class=&quot;highlighter-rouge&quot;&gt;ARRAY_SIZE&lt;/code&gt;: the total number of jobs running in a step of the pipeline.
+- &lt;code class=&quot;highlighter-rouge&quot;&gt;LIST_FILE_S3_PATH&lt;/code&gt;: a link to S3 where commands are being housed.&lt;/p&gt;
+
+&lt;p&gt;To calculate which commands it should execute, each instance runs:&lt;/p&gt;
+
+&lt;div class=&quot;language-python highlighter-rouge&quot;&gt;&lt;pre class=&quot;highlight&quot;&gt;&lt;code&gt;&lt;span class=&quot;c&quot;&gt;# this cannot be changed -- it comes from Amazon&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;array_job_idx&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;os&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;getenv&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;AWS_BATCH_JOB_ARRAY_INDEX&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;array_job_idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;array_job_idx&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;int&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;array_job_idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;else&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;array_job_idx&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;0&lt;/span&gt;
+
+&lt;span class=&quot;c&quot;&gt;# total number of docker machines&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;array_size&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;os&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;getenv&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;ARRAY_SIZE&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;if&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;array_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;array_size&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;int&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;array_size&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+&lt;span class=&quot;k&quot;&gt;else&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;array_size&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;
+
+&lt;span class=&quot;n&quot;&gt;all_commands&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;get_list_file&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;os&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;getenv&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;LIST_FILE_S3_PATH&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+&lt;span class=&quot;n&quot;&gt;total_commands&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;nb&quot;&gt;len&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;all_commands&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt;
+
+&lt;span class=&quot;k&quot;&gt;try&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;all_commands&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;get_list_file&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;os&lt;/span&gt;&lt;span class=&quot;o&quot;&gt;.&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;getenv&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;s&quot;&gt;&quot;LIST_FILE_S3_PATH&quot;&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt;
+
+    &lt;span class=&quot;c&quot;&gt;# get command from list of commands using job array index&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;lower_bound&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;total_commands&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;array_job_idx&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;)&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;/&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;array_size&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;upper_bound&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;total_commands&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;*&lt;/span&gt; &lt;span class=&quot;p&quot;&gt;(&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;array_job_idx&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;+&lt;/span&gt; &lt;span class=&quot;mi&quot;&gt;1&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;))&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;/&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;array_size&lt;/span&gt;
+
+    &lt;span class=&quot;c&quot;&gt;# 0-n commands per instance&lt;/span&gt;
+    &lt;span class=&quot;n&quot;&gt;commands&lt;/span&gt; &lt;span class=&quot;o&quot;&gt;=&lt;/span&gt; &lt;span class=&quot;n&quot;&gt;all_commands&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;[&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;lower_bound&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;:&lt;/span&gt;&lt;span class=&quot;n&quot;&gt;upper_bound&lt;/span&gt;&lt;span class=&quot;p&quot;&gt;]&lt;/span&gt;
+&lt;/code&gt;&lt;/pre&gt;
+&lt;/div&gt;
+
+&lt;h2 id=&quot;benchmarking&quot;&gt;Benchmarking&lt;/h2&gt;
+
+&lt;p&gt;On the same reconstructions, here’s a rough benchmark for improvements. Most of the performance improvement can be attributed
+to the newer hardware the jobs run on.&lt;/p&gt;
+
+&lt;table class=&quot;table table-bordered&quot;&gt;
+  &lt;thead&gt;
+    &lt;tr&gt;
+      &lt;th&gt;Pipeline&lt;/th&gt;
+      &lt;th&gt;CPU Cluster&lt;/th&gt;
+      &lt;th&gt;GPU Cluster Size&lt;/th&gt;
+      &lt;th&gt;Time&lt;/th&gt;
+      &lt;th&gt;Cost Per Run&lt;/th&gt;
+    &lt;/tr&gt;
+  &lt;/thead&gt;
+  &lt;tbody&gt;
+    &lt;tr&gt;
+      &lt;td&gt;Before&lt;/td&gt;
+      &lt;td&gt;~100 instances&lt;/td&gt;
+      &lt;td&gt;~100 instances&lt;/td&gt;
+      &lt;td&gt;8 hours&lt;/td&gt;
+      &lt;td&gt;$100-300&lt;/td&gt;
+    &lt;/tr&gt;
+    &lt;tr&gt;
+      &lt;td&gt;After&lt;/td&gt;
+      &lt;td&gt;~10 m3.8xlarge or similar instances&lt;/td&gt;
+      &lt;td&gt;~10 p3.2xlarge instances&lt;/td&gt;
+      &lt;td&gt;2-4 hours&lt;/td&gt;
+      &lt;td&gt;$10-100&lt;/td&gt;
+    &lt;/tr&gt;
+  &lt;/tbody&gt;
+&lt;/table&gt;</content><author><name>Louis Rassaby</name></author><category term="projects" /><category term="tech-blog" /><summary>For a recent contract job, I had to build a batch computing pipeline for scientific computation.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comhpc.jpg" /></entry><entry><title>Caffe Vivaldi – Closing Concert</title><link href="http://doubtingchrist.com/cellolele-vivaldi-closing-concert/" rel="alternate" type="text/html" title="Caffe Vivaldi – Closing Concert" /><published>2018-06-21T20:00:00-04:00</published><updated>2018-06-21T20:00:00-04:00</updated><id>http://doubtingchrist.com/cellolele-vivaldi-closing-concert</id><content type="html" xml:base="http://doubtingchrist.com/cellolele-vivaldi-closing-concert/">&lt;p&gt;Caffè Vivaldi has been my musical home since I came to NYC 3 years ago. It was the first place I performed in the city, 
+and I’ve met some of the most talented, genuine people of my life through it.&lt;/p&gt;
+
+&lt;p&gt;It shut down permanently last week, but we managed to get a video of our last two songs there. Skip ahead to 2:00 for the 
+beginning of the song, or watch the whole thing if you’re feeling like the full experience.&lt;/p&gt;
+
+&lt;div class=&quot;iframe-wrapper&quot;&gt;
+&lt;iframe src=&quot;https://www.facebook.com/plugins/video.php?href=https%3A%2F%2Fwww.facebook.com%2Flrassaby%2Fvideos%2F10158682476054619%2F&amp;amp;width=500&amp;amp;show_text=false&amp;amp;height=281&amp;amp;appId&quot; width=&quot;500&quot; height=&quot;281&quot; style=&quot;border:none;overflow:hidden&quot; scrolling=&quot;no&quot; frameborder=&quot;0&quot; allowtransparency=&quot;true&quot; allow=&quot;encrypted-media&quot; allowfullscreen=&quot;true&quot;&gt;&lt;/iframe&gt;
+&lt;/div&gt;</content><author><name>Louis Rassaby</name></author><category term="music" /><category term="cello" /><category term="cellolele" /><category term="cover" /><summary>Caffè Vivaldi has been my musical home since I came to NYC 3 years ago. It was the first place I performed in the city, 
+and I’ve met some of the most talented, genuine people of my life through it.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comcellolele-vivaldi.jpg" /></entry><entry><title>Learning Machine Learning</title><link href="http://doubtingchrist.com/learning-machine-learning/" rel="alternate" type="text/html" title="Learning Machine Learning" /><published>2018-04-17T20:00:00-04:00</published><updated>2018-04-17T20:00:00-04:00</updated><id>http://doubtingchrist.com/learning-machine-learning</id><content type="html" xml:base="http://doubtingchrist.com/learning-machine-learning/">&lt;p&gt;Machine learning. Just when you thought there were enough blog posts about the best way to learn, here’s another.&lt;/p&gt;
+
+&lt;div style=&quot;text-align: center;&quot;&gt;
+&lt;figure class=&quot;captioned-image&quot; style=&quot;&quot;&gt;
+    &lt;img src=&quot;/assets/img/machine-learning-xkcd.png&quot; alt=&quot;Statistics on steroids&quot; style=&quot;height: 400px;&quot; /&gt;
+    &lt;figcaption&gt;Statistics on steroids&lt;/figcaption&gt;
+&lt;/figure&gt;
+&lt;/div&gt;
+
+&lt;p&gt;Jokes aside, there are so many online resources now for getting started with machine learning that the biggest problem
+is figuring out which ones are right for you. These are the resources that worked for me:&lt;/p&gt;
+
+&lt;ol&gt;
+  &lt;li&gt;&lt;a href=&quot;https://www.coursera.org/learn/machine-learning/&quot;&gt;Andrew Ng’s first Coursera course&lt;/a&gt;. I started learning machine learning with this course. It’s a great 
+primer, based on the real CS229 course at Stanford and I’d recommend it to anyone starting off from a math/CS background.&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;http://a.co/heMZ59m&quot;&gt;Hands-On Machine Learning with Scikit-Learn and TensorFlow&lt;/a&gt;. After I finished the Coursera course, I wanted
+to start applying ML hands on. This book is the most modern one I could find, and so far it’s been great.&lt;/li&gt;
+  &lt;li&gt;&lt;a href=&quot;https://www.coursera.org/specializations/deep-learning&quot;&gt;Andrew Ng’s deep learning specialization&lt;/a&gt;. I’m gradually working through the 5 course deep learning 
+specialization on my free time.&lt;/li&gt;
+&lt;/ol&gt;</content><author><name>Louis Rassaby</name></author><category term="tech-blog" /><category term="tech" /><category term="data" /><summary>Machine learning. Just when you thought there were enough blog posts about the best way to learn, here’s another.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.commachine-learning.jpg" /></entry><entry><title>Postpartum Project</title><link href="http://doubtingchrist.com/postpartum-project/" rel="alternate" type="text/html" title="Postpartum Project" /><published>2018-02-17T19:00:00-05:00</published><updated>2018-02-17T19:00:00-05:00</updated><id>http://doubtingchrist.com/postpartum-project</id><content type="html" xml:base="http://doubtingchrist.com/postpartum-project/">&lt;p&gt;The Postpartum Project is one of the one of the largest online resource directories of postpartum specialists, with over 10k unique users per month. I had been curious about startups like &lt;a href=&quot;https://quartethealth.com&quot;&gt;Quartet&lt;/a&gt; and &lt;a href=&quot;https://talkspace.com&quot;&gt;Talkspace&lt;/a&gt; for a while, and I wanted to explore the space in a more concrete way.&lt;/p&gt;
+
+&lt;p&gt;Zoe Hicks, a friend of mine who is therapist and mother herself, founded the Postpartum Project a few years ago to help new mothers find the care they need. This year, we decided to team up.&lt;/p&gt;
+
+&lt;p&gt;I started with a redesign of the site.&lt;/p&gt;
+
+&lt;figure class=&quot;captioned-image&quot; style=&quot;&quot;&gt;
+    &lt;img src=&quot;/assets/img/postpartum-old-landing.jpg&quot; alt=&quot;Before redesign&quot; style=&quot;width: 100%&quot; /&gt;
+    &lt;figcaption&gt;Before redesign&lt;/figcaption&gt;
+&lt;/figure&gt;
+&lt;figure class=&quot;captioned-image&quot; style=&quot;&quot;&gt;
+    &lt;img src=&quot;/assets/img/postpartum-new-landing.jpg&quot; alt=&quot;After redesign&quot; style=&quot;width: 100%&quot; /&gt;
+    &lt;figcaption&gt;After redesign&lt;/figcaption&gt;
+&lt;/figure&gt;
+
+&lt;h2 id=&quot;design-elements&quot;&gt;Design Elements&lt;/h2&gt;
+
+&lt;h5 id=&quot;logo&quot;&gt;Logo&lt;/h5&gt;
+
+&lt;figure class=&quot;captioned-image&quot; style=&quot;&quot;&gt;
+    &lt;img src=&quot;/assets/img/ppp-old-new-logos.jpg&quot; alt=&quot;Redesign of the logo&quot; style=&quot;width: 100%;&quot; /&gt;
+    &lt;figcaption&gt;Redesign of the logo&lt;/figcaption&gt;
+&lt;/figure&gt;
+
+&lt;p&gt;My goal in updating the logo was to create a memorable brand that symbolizes the link between parents and children. I 
+considered hands, or arms holding a child. In the end, I chose to use feet because of how important walking is in 
+childhood development. Feet also symbolize moving forward for the 1/5 of women who experience postpartum depression.&lt;/p&gt;
+
+&lt;p&gt;Finally, because Zoe is thinking of expanding with an app, we also wanted the logo to be something that could be used as an app logo.&lt;/p&gt;
+
+&lt;h5 id=&quot;move-blogs-to-the-front-page&quot;&gt;Move blogs to the front page&lt;/h5&gt;
+
+&lt;p&gt;Fundamentally, the Postpartum Project is both a blog and a provider network. We decided to move blog posts to the front 
+page to highlight some of the content.&lt;/p&gt;
+
+&lt;h5 id=&quot;simplified-menus&quot;&gt;Simplified menus&lt;/h5&gt;
+
+&lt;p&gt;There were too many menu options, and many were unused. Meanwhile, login wasn’t possible directly from the front
+page. I reduced the menu options, and added login functionality.&lt;/p&gt;
+
+&lt;h5 id=&quot;fewer-stock-images-of-babies&quot;&gt;Fewer stock images of babies&lt;/h5&gt;
+
+&lt;p&gt;For women who are going through postpartum depression, Zoe and I thought it might be challenging to see photos of happy babies
+and families. We tried as much as possible to symbolize parenthood throughout the site without explicitly showing images of it.&lt;/p&gt;
+
+&lt;h5 id=&quot;less-verbose-content&quot;&gt;Less verbose content&lt;/h5&gt;
+
+&lt;p&gt;A lot of the content on the previous iteration of PPP was overly wordy and not very actionable. In this version, we
+updated some of the pages with the most traffic so that people would be able to more easily find what they need.&lt;/p&gt;
+
+&lt;h5 id=&quot;tech-debt&quot;&gt;Tech debt&lt;/h5&gt;
+
+&lt;p&gt;Enabling a CDN, updating dependencies, and adding Google Analytics all helped modernize the way we developed the site.&lt;/p&gt;
+
+&lt;h2 id=&quot;whats-next&quot;&gt;What’s next?&lt;/h2&gt;
+&lt;p&gt;My next plans are to improve search functionality and speed of the site.&lt;/p&gt;
+
+&lt;p&gt;Working on the Postpartum Project has inspired me to understand the therapy-tech space better. There are hundreds of treatable 
+mental health conditions. Multiply that with dozens of different treatment techniques and approaches, and it’s a headache to even know where 
+to start looking for a therapist. Even if you find some promising therapists, getting &lt;a href=&quot;https://www.theatlantic.com/health/archive/2016/06/the-struggle-of-seeking-therapy-while-poor/484970/&quot;&gt;past their voicemail&lt;/a&gt; might 
+mean calling multiple different therapists. And yet, many therapists still struggle to fill their caseloads.&lt;/p&gt;
+
+&lt;p&gt;It’s clear there’s still plenty of room for startups to improve the space.&lt;/p&gt;</content><author><name>Louis Rassaby</name></author><category term="projects" /><category term="tech" /><category term="design" /><summary>The Postpartum Project is one of the one of the largest online resource directories of postpartum specialists, with over 10k unique users per month. I had been curious about startups like Quartet and Talkspace for a while, and I wanted to explore the space in a more concrete way.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comppp-landing.jpg" /></entry><entry><title>Toxic - Cellolele</title><link href="http://doubtingchrist.com/cellolele-toxic/" rel="alternate" type="text/html" title="Toxic - Cellolele" /><published>2017-12-11T19:00:00-05:00</published><updated>2017-12-11T19:00:00-05:00</updated><id>http://doubtingchrist.com/cellolele-toxic</id><content type="html" xml:base="http://doubtingchrist.com/cellolele-toxic/">&lt;p&gt;Here’s a cover of Britney Spears’ Toxic I put together with Shannon Ferguson. For more videos, see Shannon’s 
+&lt;a href=&quot;https://www.youtube.com/channel/UCfkuEiCMHEP5I4SCRl4HG8w&quot;&gt;Youtube&lt;/a&gt; or our &lt;a href=&quot;https://www.instagram.com/cellolelemusic/&quot;&gt;Instagram&lt;/a&gt;.&lt;/p&gt;
+
+&lt;div class=&quot;iframe-wrapper&quot;&gt;
+&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/bt5OfXMAW1Q&quot; frameborder=&quot;0&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;
+&lt;/div&gt;
+
+&lt;p&gt;We also now have Soundcloud!&lt;/p&gt;
+
+&lt;div class=&quot;iframe-wrapper&quot;&gt;
+&lt;iframe width=&quot;100%&quot; height=&quot;300&quot; scrolling=&quot;no&quot; frameborder=&quot;no&quot; allow=&quot;autoplay&quot; src=&quot;https://w.soundcloud.com/player/?url=https%3A//api.soundcloud.com/users/434625504&amp;amp;color=%23ff5500&amp;amp;auto_play=false&amp;amp;hide_related=false&amp;amp;show_comments=true&amp;amp;show_user=true&amp;amp;show_reposts=false&amp;amp;show_teaser=true&amp;amp;visual=true&quot;&gt;&lt;/iframe&gt;
+&lt;/div&gt;</content><author><name>Louis Rassaby</name></author><category term="music" /><category term="cello" /><category term="cellolele" /><category term="cover" /><summary>Here’s a cover of Britney Spears’ Toxic I put together with Shannon Ferguson. For more videos, see Shannon’s 
+Youtube or our Instagram.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comcellolele-arch.jpg" /></entry><entry><title>Design at Phosphorus</title><link href="http://doubtingchrist.com/phosphorus-logo/" rel="alternate" type="text/html" title="Design at Phosphorus" /><published>2017-09-30T13:35:00-04:00</published><updated>2017-09-30T13:35:00-04:00</updated><id>http://doubtingchrist.com/phosphorus-logo</id><content type="html" xml:base="http://doubtingchrist.com/phosphorus-logo/">&lt;p&gt;At &lt;a href=&quot;http://www.phosphorus.com&quot;&gt;Phosphorus&lt;/a&gt;, my focus was building software to analyze genetic sequencing data. I can’t share any of the 
+code I developed there, but I can share the process behind something I made: the logo.&lt;/p&gt;
+
+&lt;p&gt;Here’s where it began. I was trying to convey Phosphorus’ place on the periodic table (the atomic number 15), and the 
+fact that we were doing genetic tests (hence the DNA double helix).&lt;/p&gt;
+
+&lt;div style=&quot;text-align: center;&quot;&gt;
+&lt;figure class=&quot;captioned-image&quot; style=&quot;&quot;&gt;
+    &lt;img src=&quot;/assets/img/phosphorus-square.png&quot; alt=&quot;v1&quot; style=&quot;height: 150px;&quot; /&gt;
+    &lt;figcaption&gt;v1&lt;/figcaption&gt;
+&lt;/figure&gt;
+&lt;figure class=&quot;captioned-image&quot; style=&quot;&quot;&gt;
+    &lt;img src=&quot;/assets/img/phosphorus-original.png&quot; alt=&quot;v2&quot; style=&quot;height: 150px;&quot; /&gt;
+    &lt;figcaption&gt;v2&lt;/figcaption&gt;
+&lt;/figure&gt;
+&lt;/div&gt;
+
+&lt;p&gt;Since then, the design evolved. The colors became brighter, and the lines connect to only one side.&lt;/p&gt;
+
+&lt;div style=&quot;text-align: center;&quot;&gt;
+&lt;figure class=&quot;captioned-image&quot; style=&quot;&quot;&gt;
+    &lt;img src=&quot;/assets/img/phosphorus-new.png&quot; alt=&quot;v3&quot; style=&quot;height: 150px;&quot; /&gt;
+    &lt;figcaption&gt;v3&lt;/figcaption&gt;
+&lt;/figure&gt;
+&lt;/div&gt;
+
+&lt;p&gt;It’s cool seeing your logo on the &lt;a href=&quot;http://www.phosphorus.com&quot;&gt;web&lt;/a&gt;, but my favorite spot I’ve seen the logo I made is on a cupcake.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/assets/img/phosphorus-cookie.jpg&quot; alt=&quot;cookie&quot; title=&quot;Phosphorus Cookie&quot; /&gt;&lt;/p&gt;</content><author><name>Louis Rassaby</name></author><category term="projects" /><category term="design" /><category term="logo" /><summary>At Phosphorus, my focus was building software to analyze genetic sequencing data. I can’t share any of the 
+code I developed there, but I can share the process behind something I made: the logo.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comphosphorus-explosion-small.jpg" /></entry><entry><title>Versace Eyewear Soundtrack</title><link href="http://doubtingchrist.com/versace-eyewear/" rel="alternate" type="text/html" title="Versace Eyewear Soundtrack" /><published>2017-02-05T12:35:00-05:00</published><updated>2017-02-05T12:35:00-05:00</updated><id>http://doubtingchrist.com/versace-eyewear</id><content type="html" xml:base="http://doubtingchrist.com/versace-eyewear/">&lt;p&gt;In December of 2016, I recorded this original composition for &lt;a href=&quot;http://www.versace.com/us/en-us/men/eyewear/&quot;&gt;Versace Eyewear&lt;/a&gt; with the unstoppable flamenco guitarist,
+&lt;a href=&quot;http://jacksonscottmusic.com/&quot;&gt;Jackson Scott&lt;/a&gt;. It was used in Versace’s Spring 2017 campaign.&lt;/p&gt;
+
+&lt;div class=&quot;iframe-wrapper&quot;&gt;
+&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/ZRonQmAInfo&quot; frameborder=&quot;0&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;
+&lt;/div&gt;
+
+&lt;p&gt;Jackson and I met at a jam while he was visiting NYC, and he had a vision for adding cello to a commercial spot he was
+working on. We spent a couple of sessions improvising together and went into the studio.&lt;/p&gt;
+
+&lt;p&gt;I had done a few studio recordings before, but this was my first advertising gig. I really wasn’t sure what to expect. 
+As it turned out, fitting all the music we had thought about into a one minute commercial spot was totally impossible. 
+We ended up just improvising something brand new in the studio.&lt;/p&gt;</content><author><name>Louis Rassaby</name></author><category term="music" /><category term="cello" /><summary>In December of 2016, I recorded this original composition for Versace Eyewear with the unstoppable flamenco guitarist,
+Jackson Scott. It was used in Versace’s Spring 2017 campaign.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comversace-eyewear.jpg" /></entry><entry><title>Converge — Ports Hackathon</title><link href="http://doubtingchrist.com/converge-hackathon/" rel="alternate" type="text/html" title="Converge — Ports Hackathon" /><published>2017-01-21T19:00:00-05:00</published><updated>2017-01-21T19:00:00-05:00</updated><id>http://doubtingchrist.com/converge-hackathon</id><content type="html" xml:base="http://doubtingchrist.com/converge-hackathon/">&lt;p&gt;In its 2016 “Visions of Future Shipping” &lt;a href=&quot;https://www.wartsila.com/media/news/06-09-2016-wartsila-presents-its-visions-of-future-shipping&quot;&gt;paper&lt;/a&gt;, &lt;a href=&quot;https://www.wartsila.com/&quot;&gt;Wärtsilä&lt;/a&gt; proposed ideas that could change the way
+that shipping companies operate in the future. One of the most novel ideas was ships traveling in convoy. 
+&lt;a href=&quot;http://news.mit.edu/2016/driverless-truck-platoons-save-time-fuel-1221&quot;&gt;Researchers at MIT&lt;/a&gt; explain that “like birds and fighter jets flying in formation, or bikers 
+and race car drivers drafting in packs, vehicles experience less aerodynamic drag when they drive close together.”&lt;/p&gt;
+
+&lt;p&gt;For the 2017 Ports and Logistics &lt;a href=&quot;https://nyc-portshackathon.devpost.com/&quot;&gt;Hackathon&lt;/a&gt;, we set about to take create a platform for helping
+ships to form convoys for 10 - 20% in improved fuel efficiency. &lt;!--more--&gt; Aside from the fuel efficiency gains, 
+traveling in convoys also allows ships to share resources like medical supplies rather than make expensive detours.&lt;/p&gt;
+
+&lt;p&gt;The following visualization, created by &lt;a href=&quot;https://www.kiln.digital/&quot;&gt;Kiln&lt;/a&gt; and the &lt;a href=&quot;http://www.bartlett.ucl.ac.uk/energy&quot;&gt;UCL Energy Institute&lt;/a&gt;, shows the global movement of 
+ships in 2012.&lt;/p&gt;
+
+&lt;iframe src=&quot;//www.shipmap.org&quot; style=&quot;width: 100%; height: 600px; border: 0&quot; frameborder=&quot;0&quot;&gt;&lt;/iframe&gt;
+
+&lt;p&gt;To allow these ships to become convoys, we created &lt;a href=&quot;http://rassaby.com/converge/&quot;&gt;Converge&lt;/a&gt;. The target market is small shipping companies that could 
+collaborate with each other to compete with the &lt;a href=&quot;https://en.wikipedia.org/wiki/Maersk_Triple_E-class_container_ship&quot;&gt;giant, more fuel-efficient ships&lt;/a&gt; 
+of their goliath competitors. Based on the data shown above and other ship lane data, we chose 5 of the highest-traffic 
+routes for the first version of the product.&lt;/p&gt;
+
+&lt;p&gt;Each dot represents a convoy of ships traveling along one of the routes.&lt;/p&gt;
+
+&lt;p&gt;&lt;img src=&quot;/assets/img/converge.png&quot; alt=&quot;converge-img&quot; title=&quot;Converge Screenshot&quot; /&gt;&lt;/p&gt;</content><author><name>Louis Rassaby</name></author><category term="projects" /><category term="tech" /><category term="design" /><category term="hackathon" /><summary>In its 2016 “Visions of Future Shipping” paper, Wärtsilä proposed ideas that could change the way
+that shipping companies operate in the future. One of the most novel ideas was ships traveling in convoy. 
+Researchers at MIT explain that “like birds and fighter jets flying in formation, or bikers 
+and race car drivers drafting in packs, vehicles experience less aerodynamic drag when they drive close together.”
+
+For the 2017 Ports and Logistics Hackathon, we set about to take create a platform for helping
+ships to form convoys for 10 - 20% in improved fuel efficiency.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comconverge-bg.png" /></entry><entry><title>GPU Particle Simulations</title><link href="http://doubtingchrist.com/particles/" rel="alternate" type="text/html" title="GPU Particle Simulations" /><published>2014-06-20T13:35:00-04:00</published><updated>2014-06-20T13:35:00-04:00</updated><id>http://doubtingchrist.com/particles</id><content type="html" xml:base="http://doubtingchrist.com/particles/">&lt;p&gt;For our final graphics project, &lt;a href=&quot;http://jwoogerd.github.io/&quot;&gt;Jayme Woogerd&lt;/a&gt; and I implemented a
+configurable particle system in C using OpenGL buffer 
+objects, instancing, and GLSL shaders.&lt;/p&gt;
+
+&lt;p&gt;We started by using fixed-pipeline OpenGL, rendering each particle as a point.
+Most of the parameters are configurable, including the number of 
+particles generated, the randomness spread, camera direction, 
+and location of particle generation, and the physical forces.&lt;/p&gt;
+
+&lt;div class=&quot;iframe-wrapper&quot;&gt;
+&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/d2dnotW9SSY&quot; frameborder=&quot;0&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;
+&lt;/div&gt;
+
+&lt;p&gt;We then added vertex buffer objects and instancing. Instancing 
+allows us to define a single two-dimensional template billboard, 
+shared by all particles. This 2-dimensional image is 
+rotated to always face the camera - giving the illusion 
+that the particles are 3-dimensional, while keeping the 
+rendering fast.&lt;/p&gt;
+
+&lt;div class=&quot;iframe-wrapper&quot;&gt;
+&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/kWU0Iwb4JR0&quot; frameborder=&quot;0&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;
+&lt;/div&gt;
+
+&lt;p&gt;Attributes that are unique to a given particle (such as size, 
+color, position and age) are stored and sent to the GPU via 
+buffer objects.&lt;/p&gt;
+
+&lt;div class=&quot;iframe-wrapper&quot;&gt;
+&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/RpUe9H8xyJo&quot; frameborder=&quot;0&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;
+&lt;/div&gt;
+
+&lt;p&gt;Finally, we used the GL shader language to implement different
+                texture maps and animations.&lt;/p&gt;
+
+&lt;div class=&quot;iframe-wrapper&quot;&gt;
+&lt;iframe width=&quot;560&quot; height=&quot;315&quot; src=&quot;https://www.youtube.com/embed/1RiWas8iHeU&quot; frameborder=&quot;0&quot; allowfullscreen=&quot;&quot;&gt;&lt;/iframe&gt;
+&lt;/div&gt;</content><author><name>Louis Rassaby</name></author><category term="projects" /><category term="tech" /><category term="visualization" /><category term="shaders" /><summary>For our final graphics project, Jayme Woogerd and I implemented a
+configurable particle system in C using OpenGL buffer 
+objects, instancing, and GLSL shaders.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comparticles.jpg" /></entry><entry><title>Guns and Crime Visualization</title><link href="http://doubtingchrist.com/gun-distribution/" rel="alternate" type="text/html" title="Guns and Crime Visualization" /><published>2014-02-20T12:35:00-05:00</published><updated>2014-02-20T12:35:00-05:00</updated><id>http://doubtingchrist.com/gun-distribution</id><content type="html" xml:base="http://doubtingchrist.com/gun-distribution/">&lt;p&gt;There is almost one gun per person in U.S., so it’s no surprise that the U.S. also has the highest incidence of gun
+violence in the world. I wanted to create an interactive way of understanding the distribution of guns worldwide.&lt;/p&gt;
+
+&lt;p&gt;It’s best viewed on desktop rather than mobile, and can be accessed &lt;a href=&quot;http://rassaby.com/viz/final&quot;&gt;here&lt;/a&gt;.&lt;/p&gt;</content><author><name>Louis Rassaby</name></author><category term="projects" /><category term="tech" /><category term="design" /><category term="visualization" /><category term="front-end" /><summary>There is almost one gun per person in U.S., so it’s no surprise that the U.S. also has the highest incidence of gun
+violence in the world. I wanted to create an interactive way of understanding the distribution of guns worldwide.</summary><media:thumbnail xmlns:media="http://search.yahoo.com/mrss/" url="http://doubtingchrist.comgun-distribution.png" /></entry></feed>

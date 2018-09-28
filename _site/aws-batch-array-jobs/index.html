@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+  <meta charset="utf-8"/>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+
+  <title>AWS Batch Array Jobs and GPU Processing | Louis Rassaby</title>
+
+  <!-- For Atom Feed-->
+  
+
+  <meta name="msvalidate.01" content="D8B989D9516D49E8D4EFD5141B2950A9" />
+  <meta name="description" content="For a recent contract job, I had to build a batch computing pipeline for scientific computation."/>
+  <meta name="keywords" content="software,engineer,design,scala,cello,music,louis rassaby,projects tech-blog"/>
+  <meta property="og:type" content="article"/>
+  <meta property="og:title" content="AWS Batch Array Jobs and GPU Processing | Louis Rassaby"/>
+  <meta property="og:description" content="For a recent contract job, I had to build a batch computing pipeline for scientific computation."/>
+  
+  <meta property="og:image" content="http://doubtingchrist.com/assets/img/hpc.jpg">
+  
+  <meta property="og:url" content="http://doubtingchrist.com/aws-batch-array-jobs/"/>
+  <meta name="twitter:card" content="summary_large_image"/>
+
+  <link rel="icon" href="/assets/img/favicon.png">
+
+  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/balloon-css/0.5.0/balloon.min.css" />
+  <link rel="stylesheet" href="//cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/4.1.1/css/bootstrap.min.css" />
+  <link rel="stylesheet" href="//use.fontawesome.com/releases/v5.1.0/css/all.css" integrity="sha384-lKuwvrZot6UHsBSfcMvOkWwlCMgc0TaWr+30HWe3a4ltaBwTZhyTEggF5tJv8tbt" crossorigin="anonymous">
+  <link href="//fonts.googleapis.com/css?family=PT+Sans|Playfair+Display:700|Montserrat:300,400" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/main.css">
+</head>
+
+  <body class="d-none">
+      <div class="flex-container">
+    <header class="main-header">
+    <div class="wrapper">
+        <div class="header-flex">
+            <div class="left-header-container">
+                <a href="/"> Home </a>
+            </div>
+            <div class="center-header-container">
+                <div class="logo">
+                    <div class="author-name">Louis Rassaby</div>
+                    <div class="author-title">Software Engineer</div>
+                </div>
+                <ul class="contact-links">
+    
+    <li class="email" data-balloon="Email" data-balloon-pos="left"><a href="mailto:louis@rassaby.com"><i class="far fa-envelope"></i></a></li>
+    
+
+    
+    <li class="linkedin" data-balloon="LinkedIn" data-balloon-pos="left"><a href="https://in.linkedin.com/in/lrassaby" target="_blank"><i
+            class="fab fa-linkedin"></i></a></li>
+    
+
+    
+    <li class="github" data-balloon="GitHub" data-balloon-pos="right"><a href="http://github.com/lrassaby" target="_blank"><i
+            class="fab fa-github"></i></a></li>
+    
+
+    
+    
+
+    
+    <li class="resume" data-balloon="Resume" data-balloon-pos="right"><a href="https://docs.google.com/document/d/1dJIboSF-ktdaP28DDu-gcuOW1SCCnkSdqtodJGwYkaA/export?format=pdf"><i
+            class="far fa-file-alt"></i></a></li>
+    
+</ul>
+            </div>
+            <div class="right-header-container">
+                <a href="/about"> About </a>
+            </div>
+        </div>
+    </div>
+</header> <!-- End Header -->
+
+    <article class="article-page">
+        <div class="page-image">
+            
+            <div class="cover-image" style="background: url(/assets/img/hpc.jpg) center no-repeat; background-size: cover;"></div>
+            
+        </div>
+        <div class="wrapper">
+            <div class="page-content">
+                <div class="header-page">
+                    <h1 class="page-title">AWS Batch Array Jobs and GPU Processing</h1>
+                    <div class="page-date"><time datetime="2018-07-21 20:00:00 -0400">Jul 21, 2018</time></div>
+                    <div class="page-links">
+                    
+                    
+                    
+                    
+                    </div>
+                    <div class="page-share">
+    <a href="https://twitter.com/intent/tweet?text=AWS Batch Array Jobs and GPU Processing&url=http://doubtingchrist.com/aws-batch-array-jobs/" title="Share on Twitter" rel="nofollow" target="_blank"><i class="fab fa-twitter" aria-hidden="true"></i></a>
+    <!--<a href="https://facebook.com/sharer.php?u=http://doubtingchrist.com/aws-batch-array-jobs/" title="Share on Facebook" rel="nofollow" target="_blank"><i class="fab fa-facebook" aria-hidden="true"></i></a>-->
+    <a href="https://www.linkedin.com/shareArticle?url=http://doubtingchrist.com/aws-batch-array-jobs/" title="Share on LinkedIn" rel="nofollow" target="_blank"><i class="fab fa-linkedin" aria-hidden="true"></i></a>
+    <!--<a href="https://plus.google.com/share?url=http://doubtingchrist.com/aws-batch-array-jobs/" title="Share on Google+" rel="nofollow" target="_blank"><i class="fab fa-google-plus-g" aria-hidden="true"></i></a>-->
+</div>
+                </div>
+                <p>For a recent contract job, I had to build a batch computing pipeline for scientific computation.</p>
+
+<p>The steps were:
+1. A pre-processing step running across a small CPU cluster
+2. A processing step running on a 100-machine CPU cluster
+3. A calibration step running on one machine
+4. A processing step running on a 100-machine GPU cluster</p>
+
+<h2 id="architecture">Architecture</h2>
+
+<p>After investigating a few different architectures, I concluded that AWS Batch provided the best combination of features we needed. Designed 
+for high performance computing (HPC), AWS Batch is a thin wrapper around AWS Elastic Container Service that allows
+users to run jobs in a scalable cluster and chain them together into pipelines.</p>
+
+<p>The biggest issue I ran into was gaps in documentation, particularly around AWS Batch and using GPUs inside Docker containers.</p>
+
+<p><img src="/assets/img/aws-architecture.png" alt="aws-architecture" title="AWS Architecture" /></p>
+
+<p>The architecture I ended up choosing uses CircleCI to push Docker images to Amazon ECR. Those images are later used by 
+AWS Batch to launch ECS clusters to run jobs on CPU and GPU clusters. That’s a bit of a mouthful, so I’ll try to unpack the architecture in 
+the rest of this post.</p>
+
+<h2 id="code-deployment">Code Deployment</h2>
+
+<p>The first order of business was cleaning up the repository. The master branch was out of date with other branches,
+so I worked with the scientists to solve some tech debt.</p>
+
+<p>Next, I Dockerized the codebase. This was complicated by GPU processing, which is architecture-dependent. 
+My Mac (with an Intel GPU) wouldn’t behave in the same way as AWS (NVIDIA).</p>
+
+<p>I ended up revising this dozens of times before I got it right. Here’s a snippet of the Dockerfile ended up with:
+```docker
+FROM python:2.7-jessie</p>
+
+<h1 id="install-other-dependencies-not-shown">… install other dependencies (not shown)</h1>
+
+<h1 id="nvidia-container-runtime">nvidia-container-runtime</h1>
+<p>ENV NVIDIA_VISIBLE_DEVICES all
+ENV NVIDIA_DRIVER_CAPABILITIES compute,utility</p>
+
+<h1 id="opencl-httpsgitlabcomnvidiaopenclblobubuntu1604runtimedockerfile">OpenCL (https://gitlab.com/nvidia/opencl/blob/ubuntu16.04/runtime/Dockerfile)</h1>
+<p>RUN apt-get update &amp;&amp; apt-get install -y –no-install-recommends \
+        ocl-icd-libopencl1 \
+        opencl-headers &amp;&amp; \
+    rm -rf /var/lib/apt/lists/*</p>
+
+<h1 id="section">:(</h1>
+<p>RUN ln -s /usr/lib/x86_64-linux-gnu/libOpenCL.so.1 /usr/lib/x86_64-linux-gnu/libOpenCL.so
+RUN pip install pyopencl</p>
+
+<h1 id="nvidia-driver">NVIDIA driver</h1>
+<p>RUN mkdir -p /etc/OpenCL/vendors &amp;&amp; \
+    echo “libnvidia-opencl.so.1” &gt; /etc/OpenCL/vendors/nvidia.icd
+```</p>
+
+<p>After I got Docker images working, I set up CircleCI to run builds and tests, and deploy images to Amazon’s EC2 Container Registry (ECR).</p>
+
+<h2 id="getting-things-running">Getting things running</h2>
+
+<p>The goal of the client was to create a simple way to set up, run, and monitor batch jobs.</p>
+
+<h3 id="setup">Setup</h3>
+
+<p>Setup is performed by a series of CloudFormation templates, each of which exports variables that can be subsequently
+used by other templates.
+1. Set up permissions (<code class="highlighter-rouge">deploy_iam_roles.yaml</code>)
+2. Set up an ECR repository (<code class="highlighter-rouge">deploy_ecr_repository.yaml</code>)
+3. Set up a custom GPU AMI based on Amazon Linux with <code class="highlighter-rouge">nvidia-docker2</code> installed (<code class="highlighter-rouge">deploy_custom_ami.yaml</code>)
+4. Set up AWS Batch queues, CPU and GPU compute environments of spot instances, and job definitions. (<code class="highlighter-rouge">deploy_batch_env.yaml</code>)</p>
+
+<h3 id="cli-run-monitor-and-stop-jobs">CLI: run, monitor, and stop jobs</h3>
+
+<p>For running the pipeline, I built a simple command line tool that can launch new pipelines, monitor existing ones, and 
+stop jobs if things go wrong.</p>
+
+<h3 id="behind-the-scenes">Behind the scenes</h3>
+
+<p>AWS Batch launches either normal jobs (1 Docker container) or “array jobs” (any number of Docker containers) for each step. Those 
+Docker containers in turn run on a cluster of EC2 instances.</p>
+
+<p>The CLI will decide based on the job name which of two queues to run the job in:
+- An auto-managed CPU-optimized cluster of standard AMIs
+- A self-managed GPU-optimized cluster using a custom Amazon Machine Image (AMI)</p>
+
+<p>Each Docker container in a cluster receives the following environment variables:
+- <code class="highlighter-rouge">AWS_BATCH_JOB_ARRAY_INDEX</code>: an integer passed in by AWS to indicate which machine is running. This is the only 
+variable that distinguishes jobs from each other, a limitation imposed by AWS Batch.
+- <code class="highlighter-rouge">ARRAY_SIZE</code>: the total number of jobs running in a step of the pipeline.
+- <code class="highlighter-rouge">LIST_FILE_S3_PATH</code>: a link to S3 where commands are being housed.</p>
+
+<p>To calculate which commands it should execute, each instance runs:</p>
+
+<div class="language-python highlighter-rouge"><pre class="highlight"><code><span class="c"># this cannot be changed -- it comes from Amazon</span>
+<span class="n">array_job_idx</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s">"AWS_BATCH_JOB_ARRAY_INDEX"</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">array_job_idx</span><span class="p">:</span>
+    <span class="n">array_job_idx</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">array_job_idx</span><span class="p">)</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">array_job_idx</span> <span class="o">=</span> <span class="mi">0</span>
+
+<span class="c"># total number of docker machines</span>
+<span class="n">array_size</span> <span class="o">=</span> <span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s">"ARRAY_SIZE"</span><span class="p">)</span>
+<span class="k">if</span> <span class="n">array_size</span><span class="p">:</span>
+    <span class="n">array_size</span> <span class="o">=</span> <span class="nb">int</span><span class="p">(</span><span class="n">array_size</span><span class="p">)</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">array_size</span> <span class="o">=</span> <span class="mi">1</span>
+
+<span class="n">all_commands</span> <span class="o">=</span> <span class="n">get_list_file</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s">"LIST_FILE_S3_PATH"</span><span class="p">))</span>
+<span class="n">total_commands</span> <span class="o">=</span> <span class="nb">len</span><span class="p">(</span><span class="n">all_commands</span><span class="p">)</span>
+
+<span class="k">try</span><span class="p">:</span>
+    <span class="n">all_commands</span> <span class="o">=</span> <span class="n">get_list_file</span><span class="p">(</span><span class="n">os</span><span class="o">.</span><span class="n">getenv</span><span class="p">(</span><span class="s">"LIST_FILE_S3_PATH"</span><span class="p">))</span>
+
+    <span class="c"># get command from list of commands using job array index</span>
+    <span class="n">lower_bound</span> <span class="o">=</span> <span class="p">(</span><span class="n">total_commands</span> <span class="o">*</span> <span class="n">array_job_idx</span><span class="p">)</span> <span class="o">/</span> <span class="n">array_size</span>
+    <span class="n">upper_bound</span> <span class="o">=</span> <span class="p">(</span><span class="n">total_commands</span> <span class="o">*</span> <span class="p">(</span><span class="n">array_job_idx</span> <span class="o">+</span> <span class="mi">1</span><span class="p">))</span> <span class="o">/</span> <span class="n">array_size</span>
+
+    <span class="c"># 0-n commands per instance</span>
+    <span class="n">commands</span> <span class="o">=</span> <span class="n">all_commands</span><span class="p">[</span><span class="n">lower_bound</span><span class="p">:</span><span class="n">upper_bound</span><span class="p">]</span>
+</code></pre>
+</div>
+
+<h2 id="benchmarking">Benchmarking</h2>
+
+<p>On the same reconstructions, here’s a rough benchmark for improvements. Most of the performance improvement can be attributed
+to the newer hardware the jobs run on.</p>
+
+<table class="table table-bordered">
+  <thead>
+    <tr>
+      <th>Pipeline</th>
+      <th>CPU Cluster</th>
+      <th>GPU Cluster Size</th>
+      <th>Time</th>
+      <th>Cost Per Run</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Before</td>
+      <td>~100 instances</td>
+      <td>~100 instances</td>
+      <td>8 hours</td>
+      <td>$100-300</td>
+    </tr>
+    <tr>
+      <td>After</td>
+      <td>~10 m3.8xlarge or similar instances</td>
+      <td>~10 p3.2xlarge instances</td>
+      <td>2-4 hours</td>
+      <td>$10-100</td>
+    </tr>
+  </tbody>
+</table>
+
+
+                <div class="page-footer">
+
+                </div>
+                <section class="author-box">
+  <div class="author-left">
+    <img src="/assets/img/profile-photo.jpg" alt="Louis Rassaby" class="author-img">
+    <ul class="contact-links">
+    
+    <li class="email" data-balloon="Email" data-balloon-pos="left"><a href="mailto:louis@rassaby.com"><i class="far fa-envelope"></i></a></li>
+    
+
+    
+    <li class="linkedin" data-balloon="LinkedIn" data-balloon-pos="left"><a href="https://in.linkedin.com/in/lrassaby" target="_blank"><i
+            class="fab fa-linkedin"></i></a></li>
+    
+
+    
+    <li class="github" data-balloon="GitHub" data-balloon-pos="right"><a href="http://github.com/lrassaby" target="_blank"><i
+            class="fab fa-github"></i></a></li>
+    
+
+    
+    
+
+    
+    <li class="resume" data-balloon="Resume" data-balloon-pos="right"><a href="https://docs.google.com/document/d/1dJIboSF-ktdaP28DDu-gcuOW1SCCnkSdqtodJGwYkaA/export?format=pdf"><i
+            class="far fa-file-alt"></i></a></li>
+    
+</ul>
+  </div>
+  <div class="author-right">
+    <h2>Louis Rassaby</h2>
+    <p>I’m a Brooklyn-based software engineer and entrepreneur. I’m the founder of <a href="http://wirefreight.com/">Wirefreight</a>, a
+customer-service SaaS platform for logistics. Previously, I led the new products
+engineering team at Phosphorus Genomics, analyzing genetic data and educating tens of thousands of people on their risks of
+developing or passing on genetic diseases.</p>
+
+<p>Away from the keyboard, I make food and music. I’m half of a band called <a href="/cellolele-toxic/">Cellolele</a> and I once played in
+an ad for <a href="/versace-eyewear">Versace</a>.</p>
+
+
+  </div>
+</section>
+
+                <div class="recent-box">
+  <h2 class="recent-title">Recent Posts</h2>
+  <div class="recent-list">
+    
+      
+        <a href="/aws-batch-array-jobs/" class="recent-item" style="background: url(/assets/img/hpc.jpg) center no-repeat;"><span>AWS Batch Array Jobs and GPU Processing</span></a>
+      
+    
+      
+        <a href="/cellolele-vivaldi-closing-concert/" class="recent-item" style="background: url(/assets/img/cellolele-vivaldi.jpg) center no-repeat;"><span>Caffe Vivaldi – Closing Concert</span></a>
+      
+    
+      
+        <a href="/learning-machine-learning/" class="recent-item" style="background: url(/assets/img/machine-learning.jpg) center no-repeat;"><span>Learning Machine Learning</span></a>
+      
+    
+      
+        <a href="/postpartum-project/" class="recent-item" style="background: url(/assets/img/ppp-landing.jpg) center no-repeat;"><span>Postpartum Project</span></a>
+      
+    
+  </div>
+</div> <!-- End Recent-Box -->
+
+            </div>
+        </div> <!-- End Wrapper -->
+    </article>
+<script src="//unpkg.com/isotope-layout@3.0.6/dist/isotope.pkgd.min.js"></script>
+<script src="//unpkg.com/isotope-packery@2.0.1/packery-mode.pkgd.js"></script>
+<script src="//unpkg.com/imagesloaded@4.1.4/imagesloaded.pkgd.js"></script>
+<script src="/assets/js/main.js"></script>
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-109461282-1"></script>
+<script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'UA-109461282-1');
+</script>
+
+</div>
+
+      <script src="//unpkg.com/isotope-layout@3.0.6/dist/isotope.pkgd.min.js"></script>
+<script src="//unpkg.com/isotope-packery@2.0.1/packery-mode.pkgd.js"></script>
+<script src="//unpkg.com/imagesloaded@4.1.4/imagesloaded.pkgd.js"></script>
+<script src="/assets/js/main.js"></script>
+<!-- Global site tag (gtag.js) - Google Analytics -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=UA-109461282-1"></script>
+<script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'UA-109461282-1');
+</script>
+
+  </body>
+</html>
